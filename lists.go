@@ -5,11 +5,10 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/gofrs/uuid"
 	"github.com/knadh/listmonk/models"
 	"github.com/lib/pq"
-	uuid "github.com/satori/go.uuid"
 
-	"github.com/asaskevich/govalidator"
 	"github.com/labstack/echo"
 )
 
@@ -37,13 +36,16 @@ func handleGetLists(c echo.Context) error {
 		single = true
 	}
 
-	err := app.Queries.GetLists.Select(&out.Results, listID, pg.Offset, pg.Limit)
+	err := app.queries.GetLists.Select(&out.Results, listID, pg.Offset, pg.Limit)
 	if err != nil {
+		app.log.Printf("error fetching lists: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError,
 			fmt.Sprintf("Error fetching lists: %s", pqErrMsg(err)))
-	} else if single && len(out.Results) == 0 {
+	}
+	if single && len(out.Results) == 0 {
 		return echo.NewHTTPError(http.StatusBadRequest, "List not found.")
-	} else if len(out.Results) == 0 {
+	}
+	if len(out.Results) == 0 {
 		return c.JSON(http.StatusOK, okResp{[]struct{}{}})
 	}
 
@@ -62,7 +64,6 @@ func handleGetLists(c echo.Context) error {
 	out.Total = out.Results[0].Total
 	out.Page = pg.Page
 	out.PerPage = pg.PerPage
-
 	return c.JSON(http.StatusOK, okResp{out})
 }
 
@@ -78,19 +79,27 @@ func handleCreateList(c echo.Context) error {
 	}
 
 	// Validate.
-	if !govalidator.IsByteLength(o.Name, 1, stdInputMaxLen) {
+	if !strHasLen(o.Name, 1, stdInputMaxLen) {
 		return echo.NewHTTPError(http.StatusBadRequest,
 			"Invalid length for the name field.")
 	}
 
+	uu, err := uuid.NewV4()
+	if err != nil {
+		app.log.Printf("error generating UUID: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "Error generating UUID")
+	}
+
 	// Insert and read ID.
 	var newID int
-	o.UUID = uuid.NewV4().String()
-	if err := app.Queries.CreateList.Get(&newID,
+	o.UUID = uu.String()
+	if err := app.queries.CreateList.Get(&newID,
 		o.UUID,
 		o.Name,
 		o.Type,
+		o.Optin,
 		pq.StringArray(normalizeTags(o.Tags))); err != nil {
+		app.log.Printf("error creating list: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError,
 			fmt.Sprintf("Error creating list: %s", pqErrMsg(err)))
 	}
@@ -118,8 +127,10 @@ func handleUpdateList(c echo.Context) error {
 		return err
 	}
 
-	res, err := app.Queries.UpdateList.Exec(id, o.Name, o.Type, pq.StringArray(normalizeTags(o.Tags)))
+	res, err := app.queries.UpdateList.Exec(id,
+		o.Name, o.Type, o.Optin, pq.StringArray(normalizeTags(o.Tags)))
 	if err != nil {
+		app.log.Printf("error updating list: %v", err)
 		return echo.NewHTTPError(http.StatusBadRequest,
 			fmt.Sprintf("Error updating list: %s", pqErrMsg(err)))
 	}
@@ -141,7 +152,9 @@ func handleDeleteLists(c echo.Context) error {
 	)
 
 	// Read the list IDs if they were sent in the body.
-	c.Bind(&ids)
+	if err := c.Bind(&ids); err != nil {
+		return err
+	}
 
 	if id < 1 && len(ids) == 0 {
 		return echo.NewHTTPError(http.StatusBadRequest, "Invalid ID.")
@@ -151,9 +164,10 @@ func handleDeleteLists(c echo.Context) error {
 		ids = append(ids, id)
 	}
 
-	if _, err := app.Queries.DeleteLists.Exec(ids); err != nil {
+	if _, err := app.queries.DeleteLists.Exec(ids); err != nil {
+		app.log.Printf("error deleting lists: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError,
-			fmt.Sprintf("Delete failed: %v", err))
+			fmt.Sprintf("Error deleting: %v", err))
 	}
 
 	return c.JSON(http.StatusOK, okResp{true})

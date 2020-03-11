@@ -1,9 +1,9 @@
 package main
 
 import (
+	"github.com/gofrs/uuid"
 	"github.com/knadh/listmonk/models"
 	"github.com/lib/pq"
-	uuid "github.com/satori/go.uuid"
 )
 
 // runnerDB implements runner.DataSource over the primary
@@ -29,8 +29,8 @@ func (r *runnerDB) NextCampaigns(excludeIDs []int64) ([]*models.Campaign, error)
 // Since batches are processed sequentially, the retrieval is ordered by ID,
 // and every batch takes the last ID of the last batch and fetches the next
 // batch above that.
-func (r *runnerDB) NextSubscribers(campID, limit int) ([]*models.Subscriber, error) {
-	var out []*models.Subscriber
+func (r *runnerDB) NextSubscribers(campID, limit int) ([]models.Subscriber, error) {
+	var out []models.Subscriber
 	err := r.queries.NextCampaignSubscribers.Select(&out, campID, limit)
 	return out, err
 }
@@ -52,10 +52,15 @@ func (r *runnerDB) UpdateCampaignStatus(campID int, status string) error {
 func (r *runnerDB) CreateLink(url string) (string, error) {
 	// Create a new UUID for the URL. If the URL already exists in the DB
 	// the UUID in the database is returned.
-	var uu string
-	if err := r.queries.CreateLink.Get(&uu, uuid.NewV4(), url); err != nil {
+	uu, err := uuid.NewV4()
+	if err != nil {
 		return "", err
 	}
 
-	return uu, nil
+	var out string
+	if err := r.queries.CreateLink.Get(&out, uu, url); err != nil {
+		return "", err
+	}
+
+	return out, nil
 }

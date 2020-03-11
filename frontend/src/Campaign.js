@@ -28,8 +28,8 @@ import Delta from "quill-delta"
 import "react-quill/dist/quill.snow.css"
 
 const formItemLayout = {
-  labelCol: { xs: { span: 16 }, sm: { span: 4 } },
-  wrapperCol: { xs: { span: 16 }, sm: { span: 10 } }
+  labelCol: { xs: { span: 16 }, sm: { span: 10 }, md: { span: 4 } },
+  wrapperCol: { xs: { span: 16 }, sm: { span: 14 }, md: { span: 10 } }
 }
 
 class Editor extends React.PureComponent {
@@ -37,8 +37,8 @@ class Editor extends React.PureComponent {
     editor: null,
     quill: null,
     rawInput: null,
-    selContentType: "richtext",
-    contentType: "richtext",
+    selContentType: cs.CampaignContentTypeRichtext,
+    contentType: cs.CampaignContentTypeRichtext,
     body: ""
   }
 
@@ -108,11 +108,11 @@ class Editor extends React.PureComponent {
 
     // Switching from richtext to html.
     let body = ""
-    if (this.state.selContentType === "html") {
+    if (this.state.selContentType === cs.CampaignContentTypeHTML) {
       body = this.state.quill.editor.container.firstChild.innerHTML
       // eslint-disable-next-line
       this.state.rawInput.value = body
-    } else if (this.state.selContentType === "richtext") {
+    } else if (this.state.selContentType === cs.CampaignContentTypeRichtext) {
       body = this.state.rawInput.value
       this.state.quill.editor.clipboard.dangerouslyPasteHTML(body, "raw")
     }
@@ -135,8 +135,8 @@ class Editor extends React.PureComponent {
                     style={{ minWidth: 200 }}
                     value={this.state.selContentType}
                   >
-                    <Select.Option value="richtext">Rich Text</Select.Option>
-                    <Select.Option value="html">Raw HTML</Select.Option>
+                    <Select.Option value={ cs.CampaignContentTypeRichtext }>Rich Text</Select.Option>
+                    <Select.Option value={ cs.CampaignContentTypeHTML }>Raw HTML</Select.Option>
                   </Select>
                   {this.state.contentType !== this.state.selContentType && (
                     <div className="actions">
@@ -159,7 +159,7 @@ class Editor extends React.PureComponent {
         <ReactQuill
           readOnly={this.props.formDisabled}
           style={{
-            display: this.state.contentType === "richtext" ? "block" : "none"
+            display: this.state.contentType === cs.CampaignContentTypeRichtext ? "block" : "none"
           }}
           modules={this.quillModules}
           defaultValue={this.props.record.body}
@@ -217,14 +217,14 @@ class TheFormDef extends React.PureComponent {
   }
 
   componentWillReceiveProps(nextProps) {
-    const has = nextProps.isSingle && nextProps.record.send_at !== null
-    if (!has) {
+    // On initial load, toggle the send_later switch if the record
+    // has a "send_at" date.
+    if (nextProps.record.send_at === this.props.record.send_at) {
       return
     }
-
-    if (this.state.sendLater !== has) {
-      this.setState({ sendLater: has })
-    }
+    this.setState({
+      sendLater: nextProps.isSingle && nextProps.record.send_at !== null
+    })
   }
 
   validateEmail = (rule, value, callback) => {
@@ -259,8 +259,15 @@ class TheFormDef extends React.PureComponent {
         values.tags = []
       }
 
+      values.type = cs.CampaignTypeRegular
       values.body = this.props.body
       values.content_type = this.props.contentType
+
+      if (values.send_at) {
+        values.send_later = true
+      } else {
+        values.send_later = false
+      }
 
       // Create a new campaign.
       this.setState({ loading: true })
@@ -303,7 +310,10 @@ class TheFormDef extends React.PureComponent {
             cs.ModelCampaigns,
             cs.Routes.UpdateCampaign,
             cs.MethodPut,
-            { ...values, id: this.props.record.id }
+            {
+              ...values,
+              id: this.props.record.id
+            }
           )
           .then(resp => {
             notification["success"]({
@@ -312,6 +322,7 @@ class TheFormDef extends React.PureComponent {
               description: `"${values["name"]}" updated`
             })
             this.setState({ loading: false })
+            this.props.setRecord(resp.data.data)
             cb(true)
           })
           .catch(e => {
@@ -372,17 +383,28 @@ class TheFormDef extends React.PureComponent {
     if (this.props.isSingle && record.lists) {
       subLists = record.lists
         .map(v => {
+          // Exclude deleted lists.
           return v.id !== 0 ? v.id : null
         })
         .filter(v => v !== null)
     } else if (this.props.route.location.search) {
-      // list_id in the query params.
+      // One or more list_id in the query params.
       const p = parseUrl.parse(this.props.route.location.search.substring(1))
       if (p.hasOwnProperty("list_id")) {
-        // eslint-disable-next-line radix
-        const id = parseInt(p.list_id)
-        if (id) {
-          subLists.push(id)
+        if(Array.isArray(p.list_id)) {
+          p.list_id.forEach(i => {
+            // eslint-disable-next-line radix
+            const id = parseInt(i)
+            if (id) {
+              subLists.push(id)
+            }
+          });
+        } else {
+          // eslint-disable-next-line radix
+          const id = parseInt(p.list_id)
+          if (id) {
+            subLists.push(id)
+          }
         }
       }
     }
@@ -449,7 +471,8 @@ class TheFormDef extends React.PureComponent {
               })(
                 <Select disabled={this.props.formDisabled} mode="multiple">
                   {this.props.data[cs.ModelLists].hasOwnProperty("results") &&
-                    [...this.props.data[cs.ModelLists].results].map((v, i) => (
+                    [...this.props.data[cs.ModelLists].results].map((v) => 
+                      (record.type !== cs.CampaignTypeOptin || v.optin === cs.ListOptinDouble) && (
                       <Select.Option value={v["id"]} key={v["id"]}>
                         {v["name"]}
                       </Select.Option>
@@ -510,10 +533,8 @@ class TheFormDef extends React.PureComponent {
             <hr />
             <Form.Item {...formItemLayout} label="Send later?">
               <Row>
-                <Col span={2}>
-                  {getFieldDecorator("send_later", {
-                    defaultChecked: this.props.isSingle
-                  })(
+                <Col lg={4}>
+                  {getFieldDecorator("send_later")(
                     <Switch
                       disabled={this.props.formDisabled}
                       checked={this.state.sendLater}
@@ -521,7 +542,7 @@ class TheFormDef extends React.PureComponent {
                     />
                   )}
                 </Col>
-                <Col span={12}>
+                <Col lg={20}>
                   {this.state.sendLater &&
                     getFieldDecorator("send_at", {
                       initialValue:
@@ -576,7 +597,7 @@ class Campaign extends React.PureComponent {
       : 0,
     record: {},
     formRef: null,
-    contentType: "richtext",
+    contentType: cs.CampaignContentTypeRichtext,
     previewRecord: null,
     body: "",
     currentTab: "form",
@@ -612,12 +633,17 @@ class Campaign extends React.PureComponent {
     }
   }
 
+  setRecord = r => {
+    this.setState({ record: r })
+  }
+
   fetchRecord = id => {
     this.props
       .request(cs.Routes.GetCampaign, cs.MethodGet, { id: id })
       .then(r => {
         const record = r.data.data
-        this.setState({ record: record, loading: false })
+        this.setState({ loading: false })
+        this.setRecord(record)
 
         // The form for non draft and scheduled campaigns should be locked.
         if (
@@ -655,8 +681,8 @@ class Campaign extends React.PureComponent {
   render() {
     return (
       <section className="content campaign">
-        <Row>
-          <Col span={16}>
+        <Row gutter={[2, 16]}>
+          <Col span={24} md={12}>
             {!this.state.record.id && <h1>Create a campaign</h1>}
             {this.state.record.id && (
               <div>
@@ -666,6 +692,11 @@ class Campaign extends React.PureComponent {
                   >
                     {this.state.record.status}
                   </Tag>
+                  {this.state.record.type === cs.CampaignStatusOptin && (
+                    <Tag className="campaign-type" color="geekblue">
+                      {this.state.record.type}
+                    </Tag>
+                  )}
                   {this.state.record.name}
                 </h1>
                 <span className="text-tiny text-grey">
@@ -675,7 +706,7 @@ class Campaign extends React.PureComponent {
               </div>
             )}
           </Col>
-          <Col span={8} className="right">
+          <Col span={24} md={12} className="right header-action-break">
             {!this.state.formDisabled && !this.state.loading && (
               <div>
                 <Button
@@ -755,6 +786,7 @@ class Campaign extends React.PureComponent {
                   this.setState({ formRef: r })
                 }}
                 record={this.state.record}
+                setRecord={this.setRecord}
                 isSingle={this.state.record.id ? true : false}
                 body={
                   this.state.body ? this.state.body : this.state.record.body

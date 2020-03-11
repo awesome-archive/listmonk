@@ -1,4 +1,5 @@
-import React from "react";
+import React from "react"
+import { Link } from "react-router-dom"
 import {
   Row,
   Col,
@@ -7,75 +8,77 @@ import {
   Select,
   Button,
   Tag,
+  Tooltip,
+  Icon,
   Spin,
   Popconfirm,
   notification
-} from "antd";
+} from "antd"
 
-import * as cs from "./constants";
+import * as cs from "./constants"
 
 const tagColors = {
   enabled: "green",
   blacklisted: "red"
-};
+}
 const formItemLayoutModal = {
   labelCol: { xs: { span: 24 }, sm: { span: 4 } },
   wrapperCol: { xs: { span: 24 }, sm: { span: 18 } }
-};
+}
 const formItemLayout = {
   labelCol: { xs: { span: 16 }, sm: { span: 4 } },
   wrapperCol: { xs: { span: 16 }, sm: { span: 10 } }
-};
+}
 const formItemTailLayout = {
   wrapperCol: { xs: { span: 24, offset: 0 }, sm: { span: 10, offset: 4 } }
-};
+}
 
 class CreateFormDef extends React.PureComponent {
   state = {
     confirmDirty: false,
     loading: false
-  };
+  }
 
   // Handle create / edit form submission.
   handleSubmit = (e, cb) => {
-    e.preventDefault();
+    e.preventDefault()
     if (!cb) {
       // Set a fake callback.
-      cb = () => {};
+      cb = () => {}
     }
 
     var err = null,
-      values = {};
+      values = {}
     this.props.form.validateFields((e, v) => {
-      err = e;
-      values = v;
-    });
+      err = e
+      values = v
+    })
     if (err) {
-      return;
+      return
     }
 
-    let a = values["attribs"];
-    values["attribs"] = {};
+    let a = values["attribs"]
+    values["attribs"] = {}
     if (a && a.length > 0) {
       try {
-        values["attribs"] = JSON.parse(a);
+        values["attribs"] = JSON.parse(a)
         if (values["attribs"] instanceof Array) {
           notification["error"]({
             message: "Invalid JSON type",
             description: "Attributes should be a map {} and not an array []"
-          });
-          return;
+          })
+          return
         }
       } catch (e) {
         notification["error"]({
           message: "Invalid JSON in attributes",
           description: e.toString()
-        });
-        return;
+        })
+        return
       }
     }
 
-    this.setState({ loading: true });
+    this.setState({ loading: true })
     if (this.props.formType === cs.FormCreate) {
       // Add a subscriber.
       this.props
@@ -89,22 +92,22 @@ class CreateFormDef extends React.PureComponent {
           notification["success"]({
             message: "Subscriber added",
             description: `${values["email"]} added`
-          });
+          })
           if (!this.props.isModal) {
-            this.props.fetchRecord(this.props.record.id);
+            this.props.fetchRecord(this.props.record.id)
           }
-          cb(true);
-          this.setState({ loading: false });
+          cb(true)
+          this.setState({ loading: false })
         })
         .catch(e => {
-          notification["error"]({ message: "Error", description: e.message });
-          cb(false);
-          this.setState({ loading: false });
-        });
+          notification["error"]({ message: "Error", description: e.message })
+          cb(false)
+          this.setState({ loading: false })
+        })
     } else {
       // Edit a subscriber.
-      delete values["keys"];
-      delete values["vals"];
+      delete values["keys"]
+      delete values["vals"]
       this.props
         .modelRequest(
           cs.ModelSubscribers,
@@ -116,20 +119,20 @@ class CreateFormDef extends React.PureComponent {
           notification["success"]({
             message: "Subscriber modified",
             description: `${values["email"]} modified`
-          });
+          })
           if (!this.props.isModal) {
-            this.props.fetchRecord(this.props.record.id);
+            this.props.fetchRecord(this.props.record.id)
           }
-          cb(true);
-          this.setState({ loading: false });
+          cb(true)
+          this.setState({ loading: false })
         })
         .catch(e => {
-          notification["error"]({ message: "Error", description: e.message });
-          cb(false);
-          this.setState({ loading: false });
-        });
+          notification["error"]({ message: "Error", description: e.message })
+          cb(false)
+          this.setState({ loading: false })
+        })
     }
-  };
+  }
 
   handleDeleteRecord = record => {
     this.props
@@ -143,40 +146,61 @@ class CreateFormDef extends React.PureComponent {
         notification["success"]({
           message: "Subscriber deleted",
           description: `${record.email} deleted`
-        });
+        })
 
         this.props.route.history.push({
           pathname: cs.Routes.ViewSubscribers
-        });
+        })
       })
       .catch(e => {
-        notification["error"]({ message: "Error", description: e.message });
-      });
-  };
+        notification["error"]({ message: "Error", description: e.message })
+      })
+  }
+
+  handleSendOptinMail = record => {
+    this.props
+      .request(cs.Routes.SendSubscriberOptinMail, cs.MethodPost, {
+        id: record.id
+      })
+      .then(r => {
+        notification["success"]({
+          placement: cs.MsgPosition,
+          message: "Sent",
+          description: `Opt-in e-mail sentto ${record.email}`
+        })
+      })
+      .catch(e => {
+        notification["error"]({
+          placement: cs.MsgPosition,
+          message: "Error",
+          description: e.message
+        })
+      })
+  }
 
   render() {
-    const { formType, record } = this.props;
-    const { getFieldDecorator } = this.props.form;
+    const { formType, record } = this.props
+    const { getFieldDecorator } = this.props.form
 
     if (formType === null) {
-      return null;
+      return null
     }
 
-    let subListIDs = [];
-    let subStatuses = {};
+    let subListIDs = []
+    let subStatuses = {}
     if (this.props.record && this.props.record.lists) {
       subListIDs = this.props.record.lists.map(v => {
-        return v["id"];
-      });
+        return v["id"]
+      })
       subStatuses = this.props.record.lists.reduce(
         (o, item) => ({ ...o, [item.id]: item.subscription_status }),
         {}
-      );
+      )
     } else if (this.props.list) {
-      subListIDs = [this.props.list.id];
+      subListIDs = [this.props.list.id]
     }
 
-    const layout = this.props.isModal ? formItemLayoutModal : formItemLayout;
+    const layout = this.props.isModal ? formItemLayoutModal : formItemLayout
     return (
       <Spin spinning={this.state.loading}>
         <Form onSubmit={this.handleSubmit}>
@@ -238,6 +262,24 @@ class CreateFormDef extends React.PureComponent {
                 ))}
               </Select>
             )}
+            {record.lists &&
+              record.lists.some(l => {
+                return (
+                  l.subscription_status === cs.SubscriptionStatusUnConfirmed
+                )
+              }) && (
+                <Tooltip title="Send an opt-in e-mail to the subscriber to confirm subscriptions">
+                  <Link
+                    onClick={e => {
+                      e.preventDefault()
+                      this.handleSendOptinMail(record)
+                    }}
+                    to={`/`}
+                  >
+                    <Icon type="rocket" /> Send opt-in e-mail
+                  </Link>
+                </Tooltip>
+              )}
           </Form.Item>
           <Form.Item {...layout} label="Attributes" colon={false}>
             <div>
@@ -280,7 +322,7 @@ class CreateFormDef extends React.PureComponent {
                 <Popconfirm
                   title="Are you sure?"
                   onConfirm={() => {
-                    this.handleDeleteRecord(record);
+                    this.handleDeleteRecord(record)
                   }}
                 >
                   <Button icon="delete">Delete</Button>
@@ -290,11 +332,11 @@ class CreateFormDef extends React.PureComponent {
           )}
         </Form>
       </Spin>
-    );
+    )
   }
 }
 
-const CreateForm = Form.create()(CreateFormDef);
+const CreateForm = Form.create()(CreateFormDef)
 
 class Subscriber extends React.PureComponent {
   state = {
@@ -304,19 +346,19 @@ class Subscriber extends React.PureComponent {
     subID: this.props.route.match.params
       ? parseInt(this.props.route.match.params.subID, 10)
       : 0
-  };
+  }
 
   componentDidMount() {
     // When this component is invoked within a modal from the subscribers list page,
     // the necessary context is supplied and there's no need to fetch anything.
     if (!this.props.isModal) {
       // Fetch lists.
-      this.props.modelRequest(cs.ModelLists, cs.Routes.GetLists, cs.MethodGet);
+      this.props.modelRequest(cs.ModelLists, cs.Routes.GetLists, cs.MethodGet)
 
       // Fetch subscriber.
-      this.fetchRecord(this.state.subID);
+      this.fetchRecord(this.state.subID)
     } else {
-      this.setState({ record: this.props.record, loading: false });
+      this.setState({ record: this.props.record, loading: false })
     }
   }
 
@@ -324,26 +366,26 @@ class Subscriber extends React.PureComponent {
     this.props
       .request(cs.Routes.GetSubscriber, cs.MethodGet, { id: id })
       .then(r => {
-        this.setState({ record: r.data.data, loading: false });
+        this.setState({ record: r.data.data, loading: false })
       })
       .catch(e => {
         notification["error"]({
           placement: cs.MsgPosition,
           message: "Error",
           description: e.message
-        });
-      });
-  };
+        })
+      })
+  }
 
   setFormRef = r => {
-    this.setState({ formRef: r });
-  };
+    this.setState({ formRef: r })
+  }
 
   submitForm = (e, cb) => {
     if (this.state.formRef) {
-      this.state.formRef.handleSubmit(e, cb);
+      this.state.formRef.handleSubmit(e, cb)
     }
-  };
+  }
 
   render() {
     return (
@@ -356,6 +398,7 @@ class Subscriber extends React.PureComponent {
                 <div>
                   <h1>
                     <Tag
+                      className="subscriber-status"
                       color={
                         tagColors.hasOwnProperty(this.state.record.status)
                           ? tagColors[this.state.record.status]
@@ -364,7 +407,9 @@ class Subscriber extends React.PureComponent {
                     >
                       {this.state.record.status}
                     </Tag>{" "}
-                    {this.state.record.name} ({this.state.record.email})
+                    <span className="subscriber-name">
+                      {this.state.record.name} ({this.state.record.email})
+                    </span>
                   </h1>
                   <span className="text-small text-grey">
                     ID {this.state.record.id} / UUID {this.state.record.uuid}
@@ -372,7 +417,16 @@ class Subscriber extends React.PureComponent {
                 </div>
               )}
             </Col>
-            <Col span={2} />
+            <Col span={4} className="right subscriber-export">
+              <Tooltip title="Export subscriber data" placement="top">
+                <a
+                  role="button"
+                  href={"/api/subscribers/" + this.state.record.id + "/export"}
+                >
+                  Export <Icon type="export" />
+                </a>
+              </Tooltip>
+            </Col>
           </Row>
         </header>
         <div>
@@ -385,20 +439,20 @@ class Subscriber extends React.PureComponent {
               lists={this.props.data[cs.ModelLists].results}
               wrappedComponentRef={r => {
                 if (!r) {
-                  return;
+                  return
                 }
 
                 // Save the form's reference so that when this component
                 // is used as a modal, the invoker of the model can submit
                 // it via submitForm()
-                this.setState({ formRef: r });
+                this.setState({ formRef: r })
               }}
             />
           </Spin>
         </div>
       </section>
-    );
+    )
   }
 }
 
-export default Subscriber;
+export default Subscriber

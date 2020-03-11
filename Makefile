@@ -1,10 +1,10 @@
 LAST_COMMIT := $(shell git rev-parse --short HEAD)
 LAST_COMMIT_DATE := $(shell git show -s --format=%ci ${LAST_COMMIT})
-VERSION := $(shell git tag)
-BUILDSTR := ${VERSION} (${LAST_COMMIT} $(shell date -u +"%Y-%m-%dT%H:%M:%SZ"))
+VERSION := $(shell git describe)
+BUILDSTR := ${VERSION} (${LAST_COMMIT} $(shell date -u +"%Y-%m-%dT%H:%M:%S%z"))
 
 BIN := listmonk
-STATIC := config.toml.sample schema.sql queries.sql public email-templates frontend/build:/frontend
+STATIC := config.toml.sample schema.sql queries.sql static/public:/public static/email-templates frontend/build:/frontend
 
 # Dependencies.
 .PHONY: deps
@@ -19,7 +19,7 @@ build:
 
 .PHONY: build-frontend
 build-frontend:
-	cd frontend && yarn build
+	export REACT_APP_VERSION="${VERSION}" && cd frontend && yarn build
 
 .PHONY: run
 run: build
@@ -27,7 +27,7 @@ run: build
 
 .PHONY: run-frontend
 run-frontend:
-	cd frontend && yarn start
+	export REACT_APP_VERSION="${VERSION}" && cd frontend && yarn start
 
 .PHONY: test
 test:

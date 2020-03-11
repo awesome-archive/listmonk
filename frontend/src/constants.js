@@ -1,4 +1,4 @@
-export const DateFormat = "ddd D MMM YYYY, hh:MM A"
+export const DateFormat = "ddd D MMM YYYY, hh:mm A"
 
 // Data types.
 export const ModelUsers = "users"
@@ -45,10 +45,22 @@ export const CampaignStatusRunning = "running"
 export const CampaignStatusPaused = "paused"
 export const CampaignStatusFinished = "finished"
 export const CampaignStatusCancelled = "cancelled"
+export const CampaignStatusRegular = "regular"
+export const CampaignStatusOptin = "optin"
+
+export const CampaignTypeRegular = "regular"
+export const CampaignTypeOptin = "optin"
+
+export const CampaignContentTypeRichtext = "richtext"
+export const CampaignContentTypeHTML = "html"
+export const CampaignContentTypePlain = "plain"
 
 export const SubscriptionStatusConfirmed = "confirmed"
 export const SubscriptionStatusUnConfirmed = "unconfirmed"
 export const SubscriptionStatusUnsubscribed = "unsubscribed"
+
+export const ListOptinSingle = "single"
+export const ListOptinDouble = "double"
 
 // API routes.
 export const Routes = {
@@ -71,6 +83,7 @@ export const Routes = {
   UpdateSubscriber: "/api/subscribers/:id",
   DeleteSubscriber: "/api/subscribers/:id",
   DeleteSubscribers: "/api/subscribers",
+  SendSubscriberOptinMail: "/api/subscribers/:id/optin",
   BlacklistSubscriber: "/api/subscribers/:id/blacklist",
   BlacklistSubscribers: "/api/subscribers/blacklist",
   AddSubscriberToLists: "/api/subscribers/lists/:id",

@@ -23,6 +23,11 @@ const (
 	SubscriberStatusDisabled    = "disabled"
 	SubscriberStatusBlackListed = "blacklisted"
 
+	// Subscription.
+	SubscriptionStatusUnconfirmed  = "unconfirmed"
+	SubscriptionStatusConfirmed    = "confirmed"
+	SubscriptionStatusUnsubscribed = "unsubscribed"
+
 	// Campaign.
 	CampaignStatusDraft     = "draft"
 	CampaignStatusScheduled = "scheduled"
@@ -30,10 +35,14 @@ const (
 	CampaignStatusPaused    = "paused"
 	CampaignStatusFinished  = "finished"
 	CampaignStatusCancelled = "cancelled"
+	CampaignTypeRegular     = "regular"
+	CampaignTypeOptin       = "optin"
 
 	// List.
 	ListTypePrivate = "private"
 	ListTypePublic  = "public"
+	ListOptinSingle = "single"
+	ListOptinDouble = "double"
 
 	// User.
 	UserTypeSuperadmin = "superadmin"
@@ -48,20 +57,31 @@ const (
 	ContentTpl = "content"
 )
 
+// regTplFunc represents contains a regular expression for wrapping and
+// substituting a Go template function from the user's shorthand to a full
+// function call.
+type regTplFunc struct {
+	regExp  *regexp.Regexp
+	replace string
+}
+
 // Regular expression for matching {{ Track "http://link.com" }} in the template
 // and substituting it with {{ Track "http://link.com" .Campaign.UUID .Subscriber.UUID }}
 // before compilation. This string gimmick is to make linking easier for users.
-var (
-	regexpLinkTag        = regexp.MustCompile("{{(\\s+)?TrackLink\\s+?(\"|`)(.+?)(\"|`)(\\s+)?}}")
-	regexpLinkTagReplace = `{{ TrackLink "$3" .Campaign.UUID .Subscriber.UUID }}`
-
-	regexpViewTag        = regexp.MustCompile(`{{(\s+)?TrackView(\s+)?}}`)
-	regexpViewTagReplace = `{{ TrackView .Campaign.UUID .Subscriber.UUID }}`
-)
+var regTplFuncs = []regTplFunc{
+	regTplFunc{
+		regExp:  regexp.MustCompile("{{(\\s+)?TrackLink\\s+?(\"|`)(.+?)(\"|`)(\\s+)?}}"),
+		replace: `{{ TrackLink "$3" . }}`,
+	},
+	regTplFunc{
+		regExp:  regexp.MustCompile(`{{(\s+)?(TrackView|UnsubscribeURL|OptinURL)(\s+)?}}`),
+		replace: `{{ $2 . }}`,
+	},
+}
 
 // AdminNotifCallback is a callback function that's called
 // when a campaign's status changes.
-type AdminNotifCallback func(subject string, data map[string]interface{}) error
+type AdminNotifCallback func(subject string, data interface{}) error
 
 // Base holds common fields shared across models.
 type Base struct {
@@ -115,6 +135,7 @@ type List struct {
 	UUID            string         `db:"uuid" json:"uuid"`
 	Name            string         `db:"name" json:"name"`
 	Type            string         `db:"type" json:"type"`
+	Optin           string         `db:"optin" json:"optin"`
 	Tags            pq.StringArray `db:"tags" json:"tags"`
 	SubscriberCount int            `db:"subscriber_count" json:"subscriber_count"`
 	SubscriberID    int            `db:"subscriber_id" json:"-"`
@@ -133,6 +154,7 @@ type Campaign struct {
 	CampaignMeta
 
 	UUID        string         `db:"uuid" json:"uuid"`
+	Type        string         `db:"type" json:"type"`
 	Name        string         `db:"name" json:"name"`
 	Subject     string         `db:"subject" json:"subject"`
 	FromEmail   string         `db:"from_email" json:"from_email"`
@@ -173,19 +195,6 @@ type CampaignMeta struct {
 
 // Campaigns represents a slice of Campaigns.
 type Campaigns []Campaign
-
-// Media represents an uploaded media item.
-type Media struct {
-	ID        int       `db:"id" json:"id"`
-	UUID      string    `db:"uuid" json:"uuid"`
-	Filename  string    `db:"filename" json:"filename"`
-	Width     int       `db:"width" json:"width"`
-	Height    int       `db:"height" json:"height"`
-	CreatedAt null.Time `db:"created_at" json:"created_at"`
-
-	ThumbURI string `json:"thumb_uri"`
-	URI      string `json:"uri"`
-}
 
 // Template represents a reusable e-mail template.
 type Template struct {
@@ -277,17 +286,21 @@ func (camps Campaigns) LoadStats(stmt *sqlx.Stmt) error {
 // template and sets the resultant template to Campaign.Tpl.
 func (c *Campaign) CompileTemplate(f template.FuncMap) error {
 	// Compile the base template.
-	t := regexpLinkTag.ReplaceAllString(c.TemplateBody, regexpLinkTagReplace)
-	t = regexpViewTag.ReplaceAllString(t, regexpViewTagReplace)
-	baseTPL, err := template.New(BaseTpl).Funcs(f).Parse(t)
+	body := c.TemplateBody
+	for _, r := range regTplFuncs {
+		body = r.regExp.ReplaceAllString(body, r.replace)
+	}
+	baseTPL, err := template.New(BaseTpl).Funcs(f).Parse(body)
 	if err != nil {
 		return fmt.Errorf("error compiling base template: %v", err)
 	}
 
 	// Compile the campaign message.
-	t = regexpLinkTag.ReplaceAllString(c.Body, regexpLinkTagReplace)
-	t = regexpViewTag.ReplaceAllString(t, regexpViewTagReplace)
-	msgTpl, err := template.New(ContentTpl).Funcs(f).Parse(t)
+	body = c.Body
+	for _, r := range regTplFuncs {
+		body = r.regExp.ReplaceAllString(body, r.replace)
+	}
+	msgTpl, err := template.New(ContentTpl).Funcs(f).Parse(body)
 	if err != nil {
 		return fmt.Errorf("error compiling message: %v", err)
 	}
@@ -304,7 +317,7 @@ func (c *Campaign) CompileTemplate(f template.FuncMap) error {
 // FirstName splits the name by spaces and returns the first chunk
 // of the name that's greater than 2 characters in length, assuming
 // that it is the subscriber's first name.
-func (s *Subscriber) FirstName() string {
+func (s Subscriber) FirstName() string {
 	for _, s := range strings.Split(s.Name, " ") {
 		if len(s) > 2 {
 			return s
@@ -317,7 +330,7 @@ func (s *Subscriber) FirstName() string {
 // LastName splits the name by spaces and returns the last chunk
 // of the name that's greater than 2 characters in length, assuming
 // that it is the subscriber's last name.
-func (s *Subscriber) LastName() string {
+func (s Subscriber) LastName() string {
 	chunks := strings.Split(s.Name, " ")
 	for i := len(chunks) - 1; i >= 0; i-- {
 		chunk := chunks[i]

@@ -1,3 +1,4 @@
+{{ define "header" }}
 <!doctype html>
 <html>
     <head>
@@ -23,6 +24,12 @@
                 border-radius: 5px;
             }
 
+            .header {
+                border-bottom: 1px solid #eee;
+                padding-bottom: 15px;
+                margin-bottom: 15px;
+            }
+
             .footer {
                 text-align: center;
                 font-size: 12px;
@@ -35,7 +42,20 @@
             .gutter {
                 padding: 30px;
             }
-
+            .button {
+                background: #7f2aff;
+                color: #fff !important;
+                display: inline-block;
+                border-radius: 3px;
+                padding: 10px 30px;
+                text-align: center;
+                text-decoration: none;
+                font-weight: bold;
+            }
+            .button:hover {
+                background: #222;
+                color: #fff;
+            }
             img {
                 max-width: 100%;
             }
@@ -59,13 +79,20 @@
 <body style="background-color: #F0F1F3;">
     <div class="gutter">&nbsp;</div>
     <div class="wrap">
-        {{ template "content" . }}
+        <div class="header">
+            {{ if ne LogoURL "" }}
+                <a href="{{ RootURL }}"><img src="{{ LogoURL }}" alt="listmonk" /></a>
+            {{ end }}
+        </div>
+{{ end }}
+
+{{ define "footer" }}
     </div>
     
     <div class="footer">
-        <p>Don't want to receive these e-mails? <a href="{{ .UnsubscribeURL }}">Unsubscribe</a></p>
         <p>Powered by <a href="https://listmonk.app" target="_blank">listmonk</a></p>
     </div>
-    <div class="gutter">&nbsp;{{ TrackView }}</div>
+    <div class="gutter">&nbsp;</div>
 </body>
 </html>
+{{ end }}

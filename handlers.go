@@ -1,13 +1,10 @@
 package main
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
-	"strings"
-
-	"github.com/asaskevich/govalidator"
 
 	"github.com/labstack/echo"
 )
@@ -15,9 +12,6 @@ import (
 const (
 	// stdInputMaxLen is the maximum allowed length for a standard input field.
 	stdInputMaxLen = 200
-
-	// bodyMaxLen is the maximum allowed length for e-mail bodies.
-	bodyMaxLen = 1000000
 
 	// defaultPerPage is the default number of results returned in an GET call.
 	defaultPerPage = 20
@@ -38,15 +32,19 @@ type pagination struct {
 	Limit   int `json:"limit"`
 }
 
+var reUUID = regexp.MustCompile("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
 // registerHandlers registers HTTP handlers.
-func registerHandlers(e *echo.Echo) {
+func registerHTTPHandlers(e *echo.Echo) {
 	e.GET("/", handleIndexPage)
 	e.GET("/api/config.js", handleGetConfigScript)
 	e.GET("/api/dashboard/stats", handleGetDashboardStats)
 
 	e.GET("/api/subscribers/:id", handleGetSubscriber)
+	e.GET("/api/subscribers/:id/export", handleExportSubscriberData)
 	e.POST("/api/subscribers", handleCreateSubscriber)
 	e.PUT("/api/subscribers/:id", handleUpdateSubscriber)
+	e.POST("/api/subscribers/:id/optin", handleGetSubscriberSendOptin)
 	e.PUT("/api/subscribers/blacklist", handleBlacklistSubscribers)
 	e.PUT("/api/subscribers/:id/blacklist", handleBlacklistSubscribers)
 	e.PUT("/api/subscribers/lists/:id", handleManageSubscriberLists)
@@ -59,7 +57,6 @@ func registerHandlers(e *echo.Echo) {
 	e.POST("/api/subscribers/query/delete", handleDeleteSubscribersByQuery)
 	e.PUT("/api/subscribers/query/blacklist", handleBlacklistSubscribersByQuery)
 	e.PUT("/api/subscribers/query/lists", handleManageSubscriberListsByQuery)
-
 	e.GET("/api/subscribers", handleQuerySubscribers)
 
 	e.GET("/api/import/subscribers", handleGetImportSubscribers)
@@ -98,10 +95,21 @@ func registerHandlers(e *echo.Echo) {
 	e.DELETE("/api/templates/:id", handleDeleteTemplate)
 
 	// Subscriber facing views.
-	e.GET("/unsubscribe/:campUUID/:subUUID", handleUnsubscribePage)
-	e.POST("/unsubscribe/:campUUID/:subUUID", handleUnsubscribePage)
-	e.GET("/link/:linkUUID/:campUUID/:subUUID", handleLinkRedirect)
-	e.GET("/campaign/:campUUID/:subUUID/px.png", handleRegisterCampaignView)
+	e.POST("/subscription/form", handleSubscriptionForm)
+	e.GET("/subscription/:campUUID/:subUUID", validateUUID(subscriberExists(handleSubscriptionPage),
+		"campUUID", "subUUID"))
+	e.POST("/subscription/:campUUID/:subUUID", validateUUID(subscriberExists(handleSubscriptionPage),
+		"campUUID", "subUUID"))
+	e.GET("/subscription/optin/:subUUID", validateUUID(subscriberExists(handleOptinPage), "subUUID"))
+	e.POST("/subscription/optin/:subUUID", validateUUID(subscriberExists(handleOptinPage), "subUUID"))
+	e.POST("/subscription/export/:subUUID", validateUUID(subscriberExists(handleSelfExportSubscriberData),
+		"subUUID"))
+	e.POST("/subscription/wipe/:subUUID", validateUUID(subscriberExists(handleWipeSubscriberData),
+		"subUUID"))
+	e.GET("/link/:linkUUID/:campUUID/:subUUID", validateUUID(handleLinkRedirect,
+		"linkUUID", "campUUID", "subUUID"))
+	e.GET("/campaign/:campUUID/:subUUID/px.png", validateUUID(handleRegisterCampaignView,
+		"campUUID", "subUUID"))
 
 	// Static views.
 	e.GET("/lists", handleIndexPage)
@@ -120,7 +128,7 @@ func registerHandlers(e *echo.Echo) {
 func handleIndexPage(c echo.Context) error {
 	app := c.Get("app").(*App)
 
-	b, err := app.FS.Read("/frontend/index.html")
+	b, err := app.fs.Read("/frontend/index.html")
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
@@ -129,40 +137,44 @@ func handleIndexPage(c echo.Context) error {
 	return c.String(http.StatusOK, string(b))
 }
 
-// makeAttribsBlob takes a list of keys and values and creates
-// a JSON map out of them.
-func makeAttribsBlob(keys []string, vals []string) ([]byte, bool) {
-	attribs := make(map[string]interface{})
-	for i, key := range keys {
-		var (
-			s   = vals[i]
-			val interface{}
-		)
-
-		// Try to detect common JSON types.
-		if govalidator.IsFloat(s) {
-			val, _ = strconv.ParseFloat(s, 64)
-		} else if govalidator.IsInt(s) {
-			val, _ = strconv.ParseInt(s, 10, 64)
-		} else {
-			ls := strings.ToLower(s)
-			if ls == "true" || ls == "false" {
-				val, _ = strconv.ParseBool(ls)
-			} else {
-				// It's a string.
-				val = s
+// validateUUID middleware validates the UUID string format for a given set of params.
+func validateUUID(next echo.HandlerFunc, params ...string) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		for _, p := range params {
+			if !reUUID.MatchString(c.Param(p)) {
+				return c.Render(http.StatusBadRequest, tplMessage,
+					makeMsgTpl("Invalid request", "",
+						`One or more UUIDs in the request are invalid.`))
 			}
 		}
-
-		attribs[key] = val
+		return next(c)
 	}
+}
 
-	if len(attribs) > 0 {
-		j, _ := json.Marshal(attribs)
-		return j, true
+// subscriberExists middleware checks if a subscriber exists given the UUID
+// param in a request.
+func subscriberExists(next echo.HandlerFunc, params ...string) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		var (
+			app     = c.Get("app").(*App)
+			subUUID = c.Param("subUUID")
+		)
+
+		var exists bool
+		if err := app.queries.SubscriberExists.Get(&exists, 0, subUUID); err != nil {
+			app.log.Printf("error checking subscriber existence: %v", err)
+			return c.Render(http.StatusInternalServerError, tplMessage,
+				makeMsgTpl("Error", "",
+					`Error processing request. Please retry.`))
+		}
+
+		if !exists {
+			return c.Render(http.StatusBadRequest, tplMessage,
+				makeMsgTpl("Not found", "",
+					`Subscription not found.`))
+		}
+		return next(c)
 	}
-
-	return nil, false
 }
 
 // getPagination takes form values and extracts pagination values from it.
@@ -178,8 +190,8 @@ func getPagination(q url.Values) pagination {
 		perPage = 0
 	} else {
 		ppi, _ := strconv.Atoi(pp)
-		if ppi < 1 || ppi > maxPerPage {
-			perPage = defaultPerPage
+		if ppi > 0 && ppi <= maxPerPage {
+			perPage = ppi
 		}
 	}
 

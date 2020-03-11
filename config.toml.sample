@@ -9,12 +9,12 @@ root = "https://listmonk.mysite.com"
 # (Optional) full URL to the static logo to be displayed on
 # user facing view such as the unsubscription page.
 # eg: https://mysite.com/images/logo.svg
-logo_url = ""
+logo_url = "https://listmonk.mysite.com/public/static/logo.png"
 
 # (Optional) full URL to the static favicon to be displayed on
 # user facing view such as the unsubscription page.
 # eg: https://mysite.com/images/favicon.png
-favicon_url = ""
+favicon_url = "https://listmonk.mysite.com/public/static/favicon.png"
 
 # The default 'from' e-mail for outgoing e-mail campaigns.
 from_email = "listmonk <from@mail.com>"
@@ -23,14 +23,6 @@ from_email = "listmonk <from@mail.com>"
 # import updates, campaign completion, failure etc. should be sent.
 # To disable notifications, set an empty list, eg: notify_emails = []
 notify_emails = ["admin1@mysite.com", "admin2@mysite.com"]
-
-# Path to the uploads directory where media will be uploaded.
-upload_path = "uploads"
-
-# Upload URI that's visible to the outside world. The media
-# uploaded to upload_path will be made available publicly
-# under this URI, for instance, list.yoursite.com/uploads.
-upload_uri = "/uploads"
 
 # Maximum concurrent workers that will attempt to send messages
 # simultaneously. This should depend on the number of CPUs the
@@ -44,6 +36,29 @@ concurrency = 100
 max_send_errors = 1000
 
 
+[privacy]
+# Allow subscribers to unsubscribe from all mailing lists and mark themselves
+# as blacklisted?
+allow_blacklist = false
+
+# Allow subscribers to export data recorded on them?
+allow_export = false
+
+# Items to include in the data export.
+# profile            Subscriber's profile including custom attributes
+# subscriptions      Subscriber's subscription lists (private list names are masked)
+# campaign_views     Campaigns the subscriber has viewed and the view counts
+# link_clicks        Links that the subscriber has clicked and the click counts
+exportable = ["profile", "subscriptions", "campaign_views", "link_clicks"]
+
+# Allow subscribers to delete themselves from the database?
+# This deletes the subscriber and all their subscriptions.
+# Their association to campaign views and link clicks are also
+# removed while views and click counts remain (with no subscriber
+# associated to them) so that stats and analytics aren't affected.
+allow_wipe = false
+
+
 # Database.
 [db]
 host = "demo-db"
@@ -53,8 +68,9 @@ password = "listmonk"
 database = "listmonk"
 ssl_mode = "disable"
 
-# TQekh4quVgGc3HQ
-
+# Maximum active and idle connections to pool.
+max_open = 50
+max_idle = 10
 
 # SMTP servers.
 [smtp]
@@ -63,10 +79,15 @@ ssl_mode = "disable"
         host = "my.smtp.server"
         port = "25"
 
-        # cram or plain.
+        # cram | plain | empty for no auth
         auth_protocol = "cram"
         username = "xxxxx"
         password = ""
+
+        # Optional. Some SMTP servers require a FQDN in the hostname.
+        # By default, HELLOs go with "localhost". Set this if a custom
+        # hostname should be used.
+        hello_hostname = ""
 
         # Maximum time (milliseconds) to wait per e-mail push.
         send_timeout = 5000
@@ -89,3 +110,33 @@ ssl_mode = "disable"
 
         # Maximum concurrent connections to the SMTP server.
         max_conns = 10
+
+# Upload settings
+[upload]
+# Provider which will be used to host uploaded media. Bundled providers are "filesystem" and "s3".
+provider = "filesystem"
+
+# S3 Provider settings
+[upload.s3]
+# (Optional). AWS Access Key and Secret Key for the user to access the bucket. Leaving it empty would default to use
+# instance IAM role.
+aws_access_key_id = ""
+aws_secret_access_key = ""
+# AWS Region where S3 bucket is hosted.
+aws_default_region="ap-south-1"
+# Specify bucket name.
+bucket=""
+# Path where the files will be stored inside bucket. Empty value ("") means the root of bucket.
+bucket_path=""
+# Bucket type can be "private" or "public".
+bucket_type="public"
+# (Optional) Specify TTL (in seconds) for the generated presigned URL. Expiry value is used only if the bucket is private.
+expiry="86400"
+
+# Filesystem provider settings
+[upload.filesystem]
+# Path to the uploads directory where media will be uploaded. Leaving it empty ("") means current working directory.
+upload_path=""
+# Upload URI that's visible to the outside world. The media uploaded to upload_path will be made available publicly
+# under this URI, for instance, list.yoursite.com/uploads.
+upload_uri = "/uploads"

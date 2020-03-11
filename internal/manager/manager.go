@@ -2,6 +2,7 @@ package manager
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
@@ -9,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/knadh/listmonk/messenger"
+	"github.com/knadh/listmonk/internal/messenger"
 	"github.com/knadh/listmonk/models"
 )
 
@@ -27,7 +28,7 @@ const (
 // that provides subscriber and campaign records.
 type DataSource interface {
 	NextCampaigns(excludeIDs []int64) ([]*models.Campaign, error)
-	NextSubscribers(campID, limit int) ([]*models.Subscriber, error)
+	NextSubscribers(campID, limit int) ([]models.Subscriber, error)
 	GetCampaign(campID int) (*models.Campaign, error)
 	UpdateCampaignStatus(campID int, status string) error
 	CreateLink(url string) (string, error)
@@ -43,7 +44,8 @@ type Manager struct {
 	logger     *log.Logger
 
 	// Campaigns that are currently running.
-	camps map[int]*models.Campaign
+	camps      map[int]*models.Campaign
+	campsMutex sync.RWMutex
 
 	// Links generated using Track() are cached here so as to not query
 	// the database for the link UUID for every message sent. This has to
@@ -51,20 +53,32 @@ type Manager struct {
 	links      map[string]string
 	linksMutex sync.RWMutex
 
-	subFetchQueue  chan *models.Campaign
-	msgQueue       chan *Message
-	msgErrorQueue  chan msgError
-	msgErrorCounts map[int]int
+	subFetchQueue      chan *models.Campaign
+	campMsgQueue       chan CampaignMessage
+	campMsgErrorQueue  chan msgError
+	campMsgErrorCounts map[int]int
+	msgQueue           chan Message
 }
 
-// Message represents an active subscriber that's being processed.
+// CampaignMessage represents an instance of campaign message to be pushed out,
+// specific to a subscriber, via the campaign's messenger.
+type CampaignMessage struct {
+	Campaign   *models.Campaign
+	Subscriber models.Subscriber
+
+	from     string
+	to       string
+	body     []byte
+	unsubURL string
+}
+
+// Message represents a generic message to be pushed to a messenger.
 type Message struct {
-	Campaign       *models.Campaign
-	Subscriber     *models.Subscriber
-	UnsubscribeURL string
-	Body           []byte
-	from           string
-	to             string
+	From      string
+	To        []string
+	Subject   string
+	Body      []byte
+	Messenger string
 }
 
 // Config has parameters for configuring the manager.
@@ -74,7 +88,8 @@ type Config struct {
 	RequeueOnError bool
 	FromEmail      string
 	LinkTrackURL   string
-	UnsubscribeURL string
+	UnsubURL       string
+	OptinURL       string
 	ViewTrackURL   string
 }
 
@@ -86,29 +101,32 @@ type msgError struct {
 // New returns a new instance of Mailer.
 func New(cfg Config, src DataSource, notifCB models.AdminNotifCallback, l *log.Logger) *Manager {
 	return &Manager{
-		cfg:            cfg,
-		src:            src,
-		notifCB:        notifCB,
-		logger:         l,
-		messengers:     make(map[string]messenger.Messenger),
-		camps:          make(map[int]*models.Campaign, 0),
-		links:          make(map[string]string, 0),
-		subFetchQueue:  make(chan *models.Campaign, cfg.Concurrency),
-		msgQueue:       make(chan *Message, cfg.Concurrency),
-		msgErrorQueue:  make(chan msgError, cfg.MaxSendErrors),
-		msgErrorCounts: make(map[int]int),
+		cfg:                cfg,
+		src:                src,
+		notifCB:            notifCB,
+		logger:             l,
+		messengers:         make(map[string]messenger.Messenger),
+		camps:              make(map[int]*models.Campaign),
+		links:              make(map[string]string),
+		subFetchQueue:      make(chan *models.Campaign, cfg.Concurrency),
+		campMsgQueue:       make(chan CampaignMessage, cfg.Concurrency*2),
+		msgQueue:           make(chan Message, cfg.Concurrency),
+		campMsgErrorQueue:  make(chan msgError, cfg.MaxSendErrors),
+		campMsgErrorCounts: make(map[int]int),
 	}
 }
 
-// NewMessage creates and returns a Message that is made available
-// to message templates while they're compiled.
-func (m *Manager) NewMessage(c *models.Campaign, s *models.Subscriber) *Message {
-	return &Message{
-		from:           c.FromEmail,
-		to:             s.Email,
-		Campaign:       c,
-		Subscriber:     s,
-		UnsubscribeURL: fmt.Sprintf(m.cfg.UnsubscribeURL, c.UUID, s.UUID),
+// NewCampaignMessage creates and returns a CampaignMessage that is made available
+// to message templates while they're compiled. It represents a message from
+// a campaign that's bound to a single Subscriber.
+func (m *Manager) NewCampaignMessage(c *models.Campaign, s models.Subscriber) CampaignMessage {
+	return CampaignMessage{
+		Campaign:   c,
+		Subscriber: s,
+
+		from:     c.FromEmail,
+		to:       s.Email,
+		unsubURL: fmt.Sprintf(m.cfg.UnsubURL, c.UUID, s.UUID),
 	}
 }
 
@@ -119,17 +137,26 @@ func (m *Manager) AddMessenger(msg messenger.Messenger) error {
 		return fmt.Errorf("messenger '%s' is already loaded", id)
 	}
 	m.messengers[id] = msg
+	return nil
+}
 
+// PushMessage pushes a Message to be sent out by the workers.
+func (m *Manager) PushMessage(msg Message) error {
+	select {
+	case m.msgQueue <- msg:
+	case <-time.After(time.Second * 3):
+		m.logger.Println("message push timed out: %'s'", msg.Subject)
+		return errors.New("message push timed out")
+	}
 	return nil
 }
 
 // GetMessengerNames returns the list of registered messengers.
 func (m *Manager) GetMessengerNames() []string {
-	var names []string
+	names := make([]string, 0, len(m.messengers))
 	for n := range m.messengers {
 		names = append(names, n)
 	}
-
 	return names
 }
 
@@ -176,26 +203,24 @@ func (m *Manager) Run(tick time.Duration) {
 
 				// Aggregate errors from sending messages to check against the error threshold
 				// after which a campaign is paused.
-			case e := <-m.msgErrorQueue:
+			case e := <-m.campMsgErrorQueue:
 				if m.cfg.MaxSendErrors < 1 {
 					continue
 				}
 
 				// If the error threshold is met, pause the campaign.
-				m.msgErrorCounts[e.camp.ID]++
-				if m.msgErrorCounts[e.camp.ID] >= m.cfg.MaxSendErrors {
+				m.campMsgErrorCounts[e.camp.ID]++
+				if m.campMsgErrorCounts[e.camp.ID] >= m.cfg.MaxSendErrors {
 					m.logger.Printf("error counted exceeded %d. pausing campaign %s",
 						m.cfg.MaxSendErrors, e.camp.Name)
 
 					if m.isCampaignProcessing(e.camp.ID) {
 						m.exhaustCampaign(e.camp, models.CampaignStatusPaused)
 					}
-					delete(m.msgErrorCounts, e.camp.ID)
+					delete(m.campMsgErrorCounts, e.camp.ID)
 
 					// Notify admins.
-					m.sendNotif(e.camp,
-						models.CampaignStatusPaused,
-						"Too many errors")
+					m.sendNotif(e.camp, models.CampaignStatusPaused, "Too many errors")
 				}
 			}
 		}
@@ -229,27 +254,63 @@ func (m *Manager) Run(tick time.Duration) {
 func (m *Manager) SpawnWorkers() {
 	for i := 0; i < m.cfg.Concurrency; i++ {
 		go func() {
-			for msg := range m.msgQueue {
-				if !m.isCampaignProcessing(msg.Campaign.ID) {
-					continue
-				}
+			for {
+				select {
+				// Campaign message.
+				case msg := <-m.campMsgQueue:
+					if !m.isCampaignProcessing(msg.Campaign.ID) {
+						continue
+					}
 
-				err := m.messengers[msg.Campaign.MessengerID].Push(
-					msg.from,
-					[]string{msg.to},
-					msg.Campaign.Subject,
-					msg.Body)
-				if err != nil {
-					m.logger.Printf("error sending message in campaign %s: %v",
-						msg.Campaign.Name, err)
+					err := m.messengers[msg.Campaign.MessengerID].Push(
+						msg.from, []string{msg.to}, msg.Campaign.Subject, msg.body, nil)
+					if err != nil {
+						m.logger.Printf("error sending message in campaign %s: %v", msg.Campaign.Name, err)
 
-					select {
-					case m.msgErrorQueue <- msgError{camp: msg.Campaign, err: err}:
-					default:
+						select {
+						case m.campMsgErrorQueue <- msgError{camp: msg.Campaign, err: err}:
+						default:
+						}
+					}
+
+				// Arbitrary message.
+				case msg := <-m.msgQueue:
+					err := m.messengers[msg.Messenger].Push(
+						msg.From, msg.To, msg.Subject, msg.Body, nil)
+					if err != nil {
+						m.logger.Printf("error sending message '%s': %v", msg.Subject, err)
 					}
 				}
 			}
 		}()
+	}
+}
+
+// TemplateFuncs returns the template functions to be applied into
+// compiled campaign templates.
+func (m *Manager) TemplateFuncs(c *models.Campaign) template.FuncMap {
+	return template.FuncMap{
+		"TrackLink": func(url string, msg *CampaignMessage) string {
+			return m.trackLink(url, msg.Campaign.UUID, msg.Subscriber.UUID)
+		},
+		"TrackView": func(msg *CampaignMessage) template.HTML {
+			return template.HTML(fmt.Sprintf(`<img src="%s" alt="" />`,
+				fmt.Sprintf(m.cfg.ViewTrackURL, msg.Campaign.UUID, msg.Subscriber.UUID)))
+		},
+		"UnsubscribeURL": func(msg *CampaignMessage) string {
+			return msg.unsubURL
+		},
+		"OptinURL": func(msg *CampaignMessage) string {
+			// Add list IDs.
+			// TODO: Show private lists list on optin e-mail
+			return fmt.Sprintf(m.cfg.OptinURL, msg.Subscriber.UUID, "")
+		},
+		"Date": func(layout string) string {
+			if layout == "" {
+				layout = time.ANSIC
+			}
+			return time.Now().Format(layout)
+		},
 	}
 }
 
@@ -267,18 +328,21 @@ func (m *Manager) addCampaign(c *models.Campaign) error {
 	}
 
 	// Add the campaign to the active map.
+	m.campsMutex.Lock()
 	m.camps[c.ID] = c
+	m.campsMutex.Unlock()
 	return nil
 }
 
 // getPendingCampaignIDs returns the IDs of campaigns currently being processed.
 func (m *Manager) getPendingCampaignIDs() []int64 {
 	// Needs to return an empty slice in case there are no campaigns.
-	ids := make([]int64, 0)
+	m.campsMutex.RLock()
+	ids := make([]int64, 0, len(m.camps))
 	for _, c := range m.camps {
 		ids = append(ids, int64(c.ID))
 	}
-
+	m.campsMutex.RUnlock()
 	return ids
 }
 
@@ -300,7 +364,7 @@ func (m *Manager) nextSubscribers(c *models.Campaign, batchSize int) (bool, erro
 
 	// Push messages.
 	for _, s := range subs {
-		msg := m.NewMessage(c, s)
+		msg := m.NewCampaignMessage(c, s)
 		if err := msg.Render(); err != nil {
 			m.logger.Printf("error rendering message (%s) (%s): %v", c.Name, s.Email, err)
 			continue
@@ -308,7 +372,7 @@ func (m *Manager) nextSubscribers(c *models.Campaign, batchSize int) (bool, erro
 
 		// Push the message to the queue while blocking and waiting until
 		// the queue is drained.
-		m.msgQueue <- msg
+		m.campMsgQueue <- msg
 	}
 
 	return true, nil
@@ -316,12 +380,16 @@ func (m *Manager) nextSubscribers(c *models.Campaign, batchSize int) (bool, erro
 
 // isCampaignProcessing checks if the campaign is bing processed.
 func (m *Manager) isCampaignProcessing(id int) bool {
+	m.campsMutex.RLock()
 	_, ok := m.camps[id]
+	m.campsMutex.RUnlock()
 	return ok
 }
 
 func (m *Manager) exhaustCampaign(c *models.Campaign, status string) (*models.Campaign, error) {
+	m.campsMutex.Lock()
 	delete(m.camps, c.ID)
+	m.campsMutex.Unlock()
 
 	// A status has been passed. Change the campaign's status
 	// without further checks.
@@ -353,17 +421,6 @@ func (m *Manager) exhaustCampaign(c *models.Campaign, status string) (*models.Ca
 	}
 
 	return cm, nil
-}
-
-// Render takes a Message, executes its pre-compiled Campaign.Tpl
-// and applies the resultant bytes to Message.body to be used in messages.
-func (m *Message) Render() error {
-	out := bytes.Buffer{}
-	if err := m.Campaign.Tpl.ExecuteTemplate(&out, models.BaseTpl, m); err != nil {
-		return err
-	}
-	m.Body = out.Bytes()
-	return nil
 }
 
 // trackLink register a URL and return its UUID to be used in message templates
@@ -405,26 +462,23 @@ func (m *Manager) sendNotif(c *models.Campaign, status, reason string) error {
 			"Reason": reason,
 		}
 	)
-
 	return m.notifCB(subject, data)
 }
 
-// TemplateFuncs returns the template functions to be applied into
-// compiled campaign templates.
-func (m *Manager) TemplateFuncs(c *models.Campaign) template.FuncMap {
-	return template.FuncMap{
-		"TrackLink": func(url, campUUID, subUUID string) string {
-			return m.trackLink(url, campUUID, subUUID)
-		},
-		"TrackView": func(campUUID, subUUID string) template.HTML {
-			return template.HTML(fmt.Sprintf(`<img src="%s" alt="" />`,
-				fmt.Sprintf(m.cfg.ViewTrackURL, campUUID, subUUID)))
-		},
-		"Date": func(layout string) string {
-			if layout == "" {
-				layout = time.ANSIC
-			}
-			return time.Now().Format(layout)
-		},
+// Render takes a Message, executes its pre-compiled Campaign.Tpl
+// and applies the resultant bytes to Message.body to be used in messages.
+func (m *CampaignMessage) Render() error {
+	out := bytes.Buffer{}
+	if err := m.Campaign.Tpl.ExecuteTemplate(&out, models.BaseTpl, m); err != nil {
+		return err
 	}
+	m.body = out.Bytes()
+	return nil
+}
+
+// Body returns a copy of the message body.
+func (m *CampaignMessage) Body() []byte {
+	out := make([]byte, len(m.body))
+	copy(out, m.body)
+	return out
 }

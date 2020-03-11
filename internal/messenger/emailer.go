@@ -13,14 +13,15 @@ const emName = "email"
 
 // Server represents an SMTP server's credentials.
 type Server struct {
-	Name         string
-	Host         string        `koanf:"host"`
-	Port         int           `koanf:"port"`
-	AuthProtocol string        `koanf:"auth_protocol"`
-	Username     string        `koanf:"username"`
-	Password     string        `koanf:"password"`
-	SendTimeout  time.Duration `koanf:"send_timeout"`
-	MaxConns     int           `koanf:"max_conns"`
+	Name          string
+	Host          string        `koanf:"host"`
+	Port          int           `koanf:"port"`
+	AuthProtocol  string        `koanf:"auth_protocol"`
+	Username      string        `koanf:"username"`
+	Password      string        `koanf:"password"`
+	HelloHostname string        `koanf:"hello_hostname"`
+	SendTimeout   time.Duration `koanf:"send_timeout"`
+	MaxConns      int           `koanf:"max_conns"`
 
 	mailer *email.Pool
 }
@@ -38,17 +39,23 @@ func NewEmailer(srv ...Server) (Messenger, error) {
 		servers: make(map[string]*Server),
 	}
 
-	for _, s := range srv {
+	for _, server := range srv {
+		s := server
 		var auth smtp.Auth
 		if s.AuthProtocol == "cram" {
 			auth = smtp.CRAMMD5Auth(s.Username, s.Password)
-		} else {
+		} else if s.AuthProtocol == "plain" {
 			auth = smtp.PlainAuth("", s.Username, s.Password, s.Host)
 		}
 
 		pool, err := email.NewPool(fmt.Sprintf("%s:%d", s.Host, s.Port), s.MaxConns, auth)
 		if err != nil {
 			return nil, err
+		}
+
+		// Optional SMTP HELLO hostname.
+		if server.HelloHostname != "" {
+			pool.SetHelloHostname(server.HelloHostname)
 		}
 
 		s.mailer = pool
@@ -66,7 +73,7 @@ func (e *emailer) Name() string {
 }
 
 // Push pushes a message to the server.
-func (e *emailer) Push(fromAddr string, toAddr []string, subject string, m []byte) error {
+func (e *emailer) Push(fromAddr string, toAddr []string, subject string, m []byte, atts []*Attachment) error {
 	var key string
 
 	// If there are more than one SMTP servers, send to a random
@@ -77,12 +84,28 @@ func (e *emailer) Push(fromAddr string, toAddr []string, subject string, m []byt
 		key = e.serverNames[0]
 	}
 
+	// Are there attachments?
+	var files []*email.Attachment
+	if atts != nil {
+		files = make([]*email.Attachment, 0, len(atts))
+		for _, f := range atts {
+			a := &email.Attachment{
+				Filename: f.Name,
+				Header:   f.Header,
+				Content:  make([]byte, len(f.Content)),
+			}
+			copy(a.Content, f.Content)
+			files = append(files, a)
+		}
+	}
+
 	srv := e.servers[key]
 	err := srv.mailer.Send(&email.Email{
-		From:    fromAddr,
-		To:      toAddr,
-		Subject: subject,
-		HTML:    m,
+		From:        fromAddr,
+		To:          toAddr,
+		Subject:     subject,
+		HTML:        m,
+		Attachments: files,
 	}, srv.SendTimeout)
 
 	return err

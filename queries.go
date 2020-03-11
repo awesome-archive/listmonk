@@ -19,13 +19,17 @@ type Queries struct {
 	GetSubscriber                   *sqlx.Stmt `query:"get-subscriber"`
 	GetSubscribersByEmails          *sqlx.Stmt `query:"get-subscribers-by-emails"`
 	GetSubscriberLists              *sqlx.Stmt `query:"get-subscriber-lists"`
+	GetSubscriberListsLazy          *sqlx.Stmt `query:"get-subscriber-lists-lazy"`
+	SubscriberExists                *sqlx.Stmt `query:"subscriber-exists"`
 	UpdateSubscriber                *sqlx.Stmt `query:"update-subscriber"`
 	BlacklistSubscribers            *sqlx.Stmt `query:"blacklist-subscribers"`
 	AddSubscribersToLists           *sqlx.Stmt `query:"add-subscribers-to-lists"`
 	DeleteSubscriptions             *sqlx.Stmt `query:"delete-subscriptions"`
+	ConfirmSubscriptionOptin        *sqlx.Stmt `query:"confirm-subscription-optin"`
 	UnsubscribeSubscribersFromLists *sqlx.Stmt `query:"unsubscribe-subscribers-from-lists"`
 	DeleteSubscribers               *sqlx.Stmt `query:"delete-subscribers"`
 	Unsubscribe                     *sqlx.Stmt `query:"unsubscribe"`
+	ExportSubscriberData            *sqlx.Stmt `query:"export-subscriber-data"`
 
 	// Non-prepared arbitrary subscriber queries.
 	QuerySubscribers                       string `query:"query-subscribers"`
@@ -38,6 +42,7 @@ type Queries struct {
 
 	CreateList      *sqlx.Stmt `query:"create-list"`
 	GetLists        *sqlx.Stmt `query:"get-lists"`
+	GetListsByOptin *sqlx.Stmt `query:"get-lists-by-optin"`
 	UpdateList      *sqlx.Stmt `query:"update-list"`
 	UpdateListsDate *sqlx.Stmt `query:"update-lists-date"`
 	DeleteLists     *sqlx.Stmt `query:"delete-lists"`
@@ -73,14 +78,28 @@ type Queries struct {
 	// GetStats *sqlx.Stmt `query:"get-stats"`
 }
 
+// dbConf contains database config required for connecting to a DB.
+type dbConf struct {
+	Host     string `koanf:"host"`
+	Port     int    `koanf:"port"`
+	User     string `koanf:"user"`
+	Password string `koanf:"password"`
+	DBName   string `koanf:"database"`
+	SSLMode  string `koanf:"ssl_mode"`
+	MaxOpen  int    `koanf:"max_open"`
+	MaxIdle  int    `koanf:"max_idle"`
+}
+
 // connectDB initializes a database connection.
-func connectDB(host string, port int, user, pwd, dbName string, sslMode string) (*sqlx.DB, error) {
+func connectDB(c dbConf) (*sqlx.DB, error) {
 	db, err := sqlx.Connect("postgres",
-		fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s", host, port, user, pwd, dbName, sslMode))
+		fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+			c.Host, c.Port, c.User, c.Password, c.DBName, c.SSLMode))
 	if err != nil {
 		return nil, err
 	}
-
+	db.SetMaxOpenConns(c.MaxOpen)
+	db.SetMaxIdleConns(c.MaxIdle)
 	return db, nil
 }
 
@@ -94,6 +113,7 @@ func (q *Queries) compileSubscriberQueryTpl(exp string, db *sqlx.DB) (string, er
 	if err != nil {
 		return "", err
 	}
+	defer tx.Rollback()
 
 	// Perform the dry run.
 	if exp != "" {
@@ -101,7 +121,6 @@ func (q *Queries) compileSubscriberQueryTpl(exp string, db *sqlx.DB) (string, er
 	}
 	stmt := fmt.Sprintf(q.QuerySubscribersTpl, exp)
 	if _, err := tx.Exec(stmt, true, pq.Int64Array{}); err != nil {
-		tx.Rollback()
 		return "", err
 	}
 

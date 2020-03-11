@@ -18,14 +18,13 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 
-	"github.com/lib/pq"
-	uuid "github.com/satori/go.uuid"
-
-	"github.com/asaskevich/govalidator"
+	"github.com/gofrs/uuid"
 	"github.com/knadh/listmonk/models"
+	"github.com/lib/pq"
 )
 
 const (
@@ -34,7 +33,10 @@ const (
 
 	// commitBatchSize is the number of inserts to commit in a single SQL transaction.
 	commitBatchSize = 10000
+)
 
+// Various import statuses.
+const (
 	StatusNone      = "none"
 	StatusImporting = "importing"
 	StatusStopping  = "stopping"
@@ -80,7 +82,15 @@ type Status struct {
 // SubReq is a wrapper over the Subscriber model.
 type SubReq struct {
 	models.Subscriber
-	Lists pq.Int64Array `json:"lists"`
+	Lists     pq.Int64Array  `json:"lists"`
+	ListUUIDs pq.StringArray `json:"list_uuids"`
+}
+
+type importStatusTpl struct {
+	Name     string
+	Status   string
+	Imported int
+	Total    int
 }
 
 var (
@@ -91,6 +101,11 @@ var (
 	csvHeaders = map[string]bool{"email": true,
 		"name":       true,
 		"attributes": true}
+
+	// https://www.alexedwards.net/blog/validation-snippets-for-go#email-validation
+	regexEmail = regexp.MustCompile("^[a-zA-Z0-9.!#$%&'*+\\/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$")
+
+	regexCleanStr = regexp.MustCompile("[[:^ascii:]]")
 )
 
 // New returns a new instance of Importer.
@@ -105,7 +120,6 @@ func New(upsert *sql.Stmt, blacklist *sql.Stmt, updateListDate *sql.Stmt,
 		notifCB:        notifCB,
 		status:         Status{Status: StatusNone, logBuf: bytes.NewBuffer(nil)},
 	}
-
 	return &im
 }
 
@@ -154,7 +168,6 @@ func (im *Importer) GetLogs() []byte {
 	if im.status.logBuf == nil {
 		return []byte{}
 	}
-
 	return im.status.logBuf.Bytes()
 }
 
@@ -170,7 +183,6 @@ func (im *Importer) getStatus() string {
 	im.RLock()
 	status := im.status.Status
 	im.RUnlock()
-
 	return status
 }
 
@@ -182,7 +194,6 @@ func (im *Importer) isDone() bool {
 		s = false
 	}
 	im.RUnlock()
-
 	return s
 }
 
@@ -196,19 +207,18 @@ func (im *Importer) incrementImportCount(n int) {
 // sendNotif sends admin notifications for import completions.
 func (im *Importer) sendNotif(status string) error {
 	var (
-		s    = im.GetStats()
-		data = map[string]interface{}{
-			"Name":     s.Name,
-			"Status":   status,
-			"Imported": s.Imported,
-			"Total":    s.Total,
+		s   = im.GetStats()
+		out = importStatusTpl{
+			Name:     s.Name,
+			Status:   status,
+			Imported: s.Imported,
+			Total:    s.Total,
 		}
 		subject = fmt.Sprintf("%s: %s import",
 			strings.Title(status),
 			s.Name)
 	)
-
-	return im.notifCB(subject, data)
+	return im.notifCB(subject, out)
 }
 
 // Start is a blocking function that selects on a channel queue until all
@@ -245,11 +255,17 @@ func (s *Session) Start() {
 			}
 		}
 
-		var err error
+		uu, err := uuid.NewV4()
+		if err != nil {
+			s.log.Printf("error generating UUID: %v", err)
+			tx.Rollback()
+			break
+		}
+
 		if s.mode == ModeSubscribe {
-			_, err = stmt.Exec(uuid.NewV4(), sub.Email, sub.Name, sub.Attribs, listIDs)
+			_, err = stmt.Exec(uu, sub.Email, sub.Name, sub.Attribs, listIDs)
 		} else if s.mode == ModeBlacklist {
-			_, err = stmt.Exec(uuid.NewV4(), sub.Email, sub.Name, sub.Attribs)
+			_, err = stmt.Exec(uu, sub.Email, sub.Name, sub.Attribs)
 		}
 		if err != nil {
 			s.log.Printf("error executing insert: %v", err)
@@ -335,7 +351,7 @@ func (s *Session) ExtractZIP(srcPath string, maxCSVs int) (string, []string, err
 		return "", nil, err
 	}
 
-	var files []string
+	files := make([]string, 0, len(z.File))
 	for _, f := range z.File {
 		fName := f.FileInfo().Name()
 
@@ -421,7 +437,7 @@ func (s *Session) LoadCSV(srcPath string, delim rune) error {
 	s.im.Unlock()
 
 	// Rewind, now that we've done a linecount on the same handler.
-	f.Seek(0, 0)
+	_, _ = f.Seek(0, 0)
 	rd := csv.NewReader(f)
 	rd.Comma = delim
 
@@ -514,7 +530,6 @@ func (s *Session) LoadCSV(srcPath string, delim rune) error {
 
 	close(s.subQueue)
 	failed = false
-
 	return nil
 }
 
@@ -542,11 +557,12 @@ func (s *Session) mapCSVHeaders(csvHdrs []string, knownHdrs map[string]bool) map
 	// This is to allow dynamic ordering of columns in th CSV.
 	hdrKeys := make(map[string]int)
 	for i, h := range csvHdrs {
+		// Clean the string of non-ASCII characters (BOM etc.).
+		h := regexCleanStr.ReplaceAllString(h, "")
 		if _, ok := knownHdrs[h]; !ok {
 			s.log.Printf("ignoring unknown header '%s'", h)
 			continue
 		}
-
 		hdrKeys[h] = i
 	}
 
@@ -555,13 +571,15 @@ func (s *Session) mapCSVHeaders(csvHdrs []string, knownHdrs map[string]bool) map
 
 // ValidateFields validates incoming subscriber field values.
 func ValidateFields(s SubReq) error {
-	if !govalidator.IsEmail(s.Email) {
-		return errors.New(`invalid email "` + s.Email + `"`)
+	if len(s.Email) > 1000 {
+		return errors.New(`e-mail too long`)
 	}
-	if !govalidator.IsByteLength(s.Name, 1, stdInputMaxLen) {
+	if !IsEmail(s.Email) {
+		return errors.New(`invalid e-mail "` + s.Email + `"`)
+	}
+	if len(s.Name) == 0 || len(s.Name) > stdInputMaxLen {
 		return errors.New(`invalid or empty name "` + s.Name + `"`)
 	}
-
 	return nil
 }
 
@@ -587,5 +605,9 @@ func countLines(r io.Reader) (int, error) {
 			return count, err
 		}
 	}
+}
 
+// IsEmail checks whether the given string is a valid e-mail address.
+func IsEmail(email string) bool {
+	return regexEmail.MatchString(email)
 }
